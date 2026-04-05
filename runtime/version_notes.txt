@@ -1,0 +1,7 @@
+Protocol Version History
+========================
+v1001 — Genesis: FN-DSA, ML-DSA, SLH-DSA support added
+v1002 — Multi-shard deployment (9 shards)
+v1003 — PQC gas rebalance: ML-DSA 2.1→3.0 TGas, SLH-DSA 3.2→8.0 TGas
+
+Current STABLE_PROTOCOL_VERSION: 1003
