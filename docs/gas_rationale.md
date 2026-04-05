@@ -1,31 +1,21 @@
-# PQC Gas Constant Rationale
+# Gas Rationale
 
-## Overview
+## The problem with the v1002 constants
 
-Gas in Final Layer (inherited from NEAR Protocol) represents the computational budget for executing operations. For PQC signature verification, gas must be set so that:
+The initial gas constants in v1001/v1002 were estimates based on key size ratios, not measured verification times. That turned out to be wrong — verification time doesn't scale linearly with key or signature size. SLH-DSA in particular was severely underpriced: at 3.2 TGas it would let an attacker submit transactions that take longer to verify than a block time on a min-spec validator.
 
-1. A min-spec validator can keep up with block production even under adversarial load
-2. Users are not overcharged relative to actual compute cost
-3. Underpriced operations cannot be used as a DoS vector
+## Benchmark methodology
 
----
+1000 iterations of each algorithm on two real validator machines. Each iteration: generate key pair, sign a 64-byte message, verify. Wall-clock nanoseconds recorded per verification.
 
-## Benchmark Methodology
+Gas constants are calibrated to the slower machine at p99. If we calibrated to the faster machine, validators with less powerful hardware would struggle on adversarial blocks.
 
-Gas constants were calibrated using a **1000-iteration benchmark** of each PQC verify function, run on two real validator hardware profiles:
+Machine A: 4-core Intel Skylake, 16GB RAM.
+Machine B: 2-core Intel Xeon Skylake, 4GB RAM. This is the min-spec reference.
 
-**Machine A (4-core, 16GB RAM):** Primary production validator  
-**Machine B (2-core, 4GB RAM):** Secondary validator — used as **min-spec reference**
+## Results
 
-Gas constants are set based on **Machine B (min-spec)** at the **p99** percentile. This ensures that even the weakest validator in the network can handle worst-case verification workloads without falling behind.
-
-The benchmark used the native `near-crypto` Rust crate compiled with release optimizations — the same code path as the actual node.
-
----
-
-## Benchmark Results
-
-### Machine A (4-core, 16GB)
+Machine A:
 
 | Algorithm | p50 | p95 | p99 |
 |---|---|---|---|
@@ -33,7 +23,7 @@ The benchmark used the native `near-crypto` Rust crate compiled with release opt
 | ML-DSA | 0.162ms | 0.521ms | 0.894ms |
 | SLH-DSA | 0.626ms | 1.847ms | 2.203ms |
 
-### Machine B (2-core, 4GB) — Min-Spec Reference
+Machine B (min-spec):
 
 | Algorithm | p50 | p95 | p99 |
 |---|---|---|---|
@@ -41,52 +31,19 @@ The benchmark used the native `near-crypto` Rust crate compiled with release opt
 | ML-DSA | 0.330ms | 1.124ms | 1.703ms |
 | SLH-DSA | 0.972ms | 3.614ms | 5.098ms |
 
----
+## How the constants were set
 
-## Gas Derivation
+NEAR's model is roughly 1 TGas per millisecond of compute. Using min-spec p99:
 
-NEAR's gas model: **1 TGas ≈ 1ms** of compute on a reference validator.
+FN-DSA at 0.241ms gets 1.4 TGas — about 5.8x headroom. It's the default algorithm for most users so we kept it cheap deliberately. The large multiplier also means it won't need another raise as hardware varies.
 
-Using min-spec p99 values:
+ML-DSA at 1.703ms gets 3.0 TGas — 1.76x headroom. Raised from 2.1 TGas in v1003.
 
-| Algorithm | p99 (min-spec) | Theoretical min | Assigned gas | Headroom |
-|---|---|---|---|---|
-| FN-DSA | 0.241ms | 0.241 TGas | **1.4 TGas** | 5.8x |
-| ML-DSA | 1.703ms | 1.703 TGas | **3.0 TGas** | 1.76x |
-| SLH-DSA | 5.098ms | 5.098 TGas | **8.0 TGas** | 1.57x |
+SLH-DSA at 5.098ms gets 8.0 TGas — 1.57x headroom. Raised from 3.2 TGas in v1003. The raise is large for two reasons: verification is the slowest of the three schemes, and signatures are ~8KB which also burns chunk space. At 3.2 TGas the DoS math didn't work out in favor of validators.
 
-### Why different headroom multipliers?
+## Protocol history
 
-**FN-DSA gets the largest headroom (5.8x)** because:
-- It is the recommended default algorithm for most users
-- Generous headroom ensures it stays cheap even on future slower hardware
-- Small signatures (666B) mean no chunk-size concerns
+v1001: FN-DSA 1.4 TGas, ML-DSA 2.1 TGas, SLH-DSA 3.2 TGas (initial estimates).
+v1003: ML-DSA raised to 3.0 TGas, SLH-DSA raised to 8.0 TGas based on benchmark data.
 
-**ML-DSA and SLH-DSA get tighter headroom (~1.6–1.8x)** because:
-- These are power-user/institutional algorithms
-- Tighter headroom keeps them accessible (not prohibitively expensive)
-- Minimum safe headroom over p99 is ~1.5x to absorb CPU scheduling jitter
-
----
-
-## Why SLH-DSA Has the Highest Gas (+150% from initial estimate)
-
-SLH-DSA is expensive for two compounding reasons:
-
-**1. CPU cost** — SPHINCS+ verification requires hashing through a hypertree structure. Unlike lattice schemes (FN-DSA, ML-DSA) that use polynomial arithmetic, SPHINCS+ chains many SHA-2/SHAKE operations. At p99 on min-spec: **5.098ms** — over 5× slower than FN-DSA.
-
-**2. Bandwidth cost** — SLH-DSA signatures are ~8,000 bytes. In NEAR's chunked architecture, each chunk has a hard size limit. An 8KB signature consumes ~12× more chunk space than an FN-DSA signature (666B), reducing effective TX throughput.
-
-**Combined attack surface:** Without correct gas pricing, an attacker could submit SLH-DSA TXs that are cheap to create but expensive to verify, exceeding one block time on min-spec validators — a structural DoS vector. At 8.0 TGas, this vector is closed.
-
----
-
-## Protocol Version History
-
-| Version | Change |
-|---|---|
-| v1001 | Genesis — FN-DSA 1.4 TGas, ML-DSA 2.1 TGas, SLH-DSA 3.2 TGas |
-| v1002 | 9-shard deployment (no gas change) |
-| v1003 | **Gas rebalance hard fork**: ML-DSA → 3.0 TGas, SLH-DSA → 8.0 TGas |
-
-Gas constant changes are consensus-critical (all validators must agree on gas costs → requires hard fork).
+Gas changes are consensus-critical and require a hard fork because all validators must agree on the cost of every operation.
