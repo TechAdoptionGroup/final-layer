@@ -319,6 +319,51 @@ impl StakingPool {
         }
     }
 
+    // ── Admin: emergency state correction (owner only) ───────────────────────
+
+    /// Fix total_staked_balance and last_locked_balance after accounting corruption.
+    /// Only callable by pool owner.
+    pub fn fix_pool_accounting(&mut self, total_staked: U128, last_locked: U128) {
+        require!(env::predecessor_account_id() == self.owner_id, "Owner only");
+        self.total_staked_balance = total_staked.0;
+        self.last_locked_balance = last_locked.0;
+    }
+
+    /// Fix a delegator's shares and principal after accounting corruption.
+    /// Adjusts total_stake_shares accordingly. Owner only.
+    pub fn fix_delegator_shares(&mut self, account_id: AccountId, shares: U128, principal: U128) {
+        require!(env::predecessor_account_id() == self.owner_id, "Owner only");
+        let old = self.delegators.get(&account_id).unwrap_or_default();
+        self.total_stake_shares = self.total_stake_shares
+            .saturating_sub(old.stake_shares)
+            .saturating_add(shares.0);
+        let mut d = old;
+        d.stake_shares = shares.0;
+        d.principal = principal.0;
+        self.delegators.insert(&account_id, &d);
+    }
+
+    /// Fix a delegator's unstaked_balance after accounting corruption. Owner only.
+    pub fn fix_delegator_unstaked(&mut self, account_id: AccountId, unstaked_balance: U128) {
+        require!(env::predecessor_account_id() == self.owner_id, "Owner only");
+        let old = self.delegators.get(&account_id).unwrap_or_default();
+        let mut d = old;
+        d.unstaked_balance = unstaked_balance.0;
+        self.delegators.insert(&account_id, &d);
+    }
+
+    /// Debug: return raw stake_shares for an account
+    pub fn debug_get_stake_shares(&self, account_id: AccountId) -> String {
+        let d = self.delegators.get(&account_id).unwrap_or_default();
+        format!("shares={} principal={} total_shares={} total_staked={}",
+            d.stake_shares, d.principal, self.total_stake_shares, self.total_staked_balance)
+    }
+
+    /// Debug: compute amount_for_shares directly
+    pub fn debug_amount_for_shares(&self, shares: U128) -> U128 {
+        U128(self.amount_for_shares(shares.0))
+    }
+
     pub fn get_total_staked_balance(&self) -> U128 { U128(self.total_staked_balance) }
     pub fn get_total_stake_shares(&self)   -> U128 { U128(self.total_stake_shares) }
     pub fn get_owner_id(&self)             -> AccountId { self.owner_id.clone() }
@@ -365,13 +410,20 @@ impl StakingPool {
         #[cfg(target_arch = "wasm32")]
         {
             let acct = env::current_account_id().to_string();
-            let amt  = self.total_staked_balance;
+            // Never reduce the validator's protocol stake below what it currently is.
+            // king.fl may have self-staked funds that went through the protocol directly
+            // (not through this pool), so total_staked_balance may be less than the
+            // actual locked balance. Issuing stake(total_staked) when total_staked <
+            // locked would drop the validator's stake to just the delegator total.
+            let amt  = self.total_staked_balance.max(self.last_locked_balance);
             let pk   = self.staking_key_bytes.clone();
             unsafe {
                 let idx = sys_promise_batch_create(&acct);
                 sys_promise_batch_action_stake(idx, amt, &pk);
             }
-            self.last_locked_balance = amt;
+            // NOTE: do NOT update last_locked_balance here — internal_ping already
+            // snapshots the current locked balance before each deposit. Overwriting it
+            // causes the next internal_ping to see phantom rewards. (v6 fix)
         }
     }
 
@@ -382,25 +434,44 @@ impl StakingPool {
 
     fn shares_for_amount(&self, amount: u128) -> u128 {
         if self.total_staked_balance == 0 { return amount; }
-        amount.checked_mul(self.total_stake_shares)
-            .map(|n| n / self.total_staked_balance)
-            .unwrap_or_else(|| (amount / self.total_staked_balance) * self.total_stake_shares)
+        muldiv128(amount, self.total_stake_shares, self.total_staked_balance)
     }
 
     fn shares_for_amount_post_reduce(&self, fee: u128, rewards: u128, burned: u128) -> u128 {
         let ps = self.total_staked_balance.saturating_sub(rewards);
         let ph = self.total_stake_shares.saturating_sub(burned);
         if ps == 0 { return fee; }
-        fee.checked_mul(ph).map(|n| n / ps)
-            .unwrap_or_else(|| (fee / ps) * ph)
+        muldiv128(fee, ph, ps)
     }
 
     fn amount_for_shares(&self, shares: u128) -> u128 {
         if self.total_stake_shares == 0 { return 0; }
-        shares.checked_mul(self.total_staked_balance)
-            .map(|n| n / self.total_stake_shares)
-            .unwrap_or_else(|| (shares / self.total_stake_shares) * self.total_staked_balance)
+        muldiv128(shares, self.total_staked_balance, self.total_stake_shares)
     }
+}
+
+// ── Overflow-safe multiply-divide ─────────────────────────────────────────────
+
+/// Compute floor(a * b / c) without u128 overflow.
+/// Uses the identity: floor(a * b / c) = (a / c) * b + floor((a % c) * b / c)
+fn muldiv128(a: u128, b: u128, c: u128) -> u128 {
+    if c == 0 { return 0; }
+    if let Some(ab) = a.checked_mul(b) {
+        return ab / c;
+    }
+    let q = a / c;
+    let r = a % c;
+    let term1 = q.saturating_mul(b);
+    let term2 = if let Some(rb) = r.checked_mul(b) {
+        rb / c
+    } else {
+        let bq = b / c;
+        let br = b % c;
+        let t1 = r.saturating_mul(bq);
+        let t2 = r.saturating_mul(br) / c;
+        t1.saturating_add(t2)
+    };
+    term1.saturating_add(term2)
 }
 
 // ── Key parsing ───────────────────────────────────────────────────────────────
@@ -419,7 +490,7 @@ fn parse_key_string(key_str: &str) -> Vec<u8> {
         other    => panic!("Unknown key algorithm: {}", other),
     };
 
-    let mut key_bytes = bs58::decode(b58).into_vec().expect("Invalid base58");
+    let key_bytes = bs58::decode(b58).into_vec().expect("Invalid base58");
 
     let pk_len: usize = match algo {
         "mldsa"  => 1952,
