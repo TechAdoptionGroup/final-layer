@@ -153,9 +153,9 @@ so only new locked-balance increases (actual validator rewards) count as
 delegator rewards.
 
 DEPLOYMENT STATUS (2026-04-06):
-  king.fl:        code_hash Bser9knkgvdGakHV92ryvhReieim9N3uxpU8Navthbcg (v5) ✓
-  validator-1.fl: code_hash Bser9knkgvdGakHV92ryvhReieim9N3uxpU8Navthbcg (v5) ✓
-  validator-2.fl: code_hash Bser9knkgvdGakHV92ryvhReieim9N3uxpU8Navthbcg (v5) ✓
+  <validator-a>: code_hash Bser9knkgvdGakHV92ryvhReieim9N3uxpU8Navthbcg (v5) ✓
+  <validator-b>: code_hash Bser9knkgvdGakHV92ryvhReieim9N3uxpU8Navthbcg (v5) ✓
+  <validator-c>: code_hash Bser9knkgvdGakHV92ryvhReieim9N3uxpU8Navthbcg (v5) ✓
 
 All three mainnet validator staking pools have been upgraded to v5.
 Live test confirmation: T0-Bootstrap PASSED (13/13 tests total, see
