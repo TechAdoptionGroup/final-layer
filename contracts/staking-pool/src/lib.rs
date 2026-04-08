@@ -167,12 +167,19 @@ impl StakingPool {
         let account_id = env::predecessor_account_id();
         let mut d = self.delegators.get(&account_id).unwrap_or_default();
         d.stake_shares += shares;
-        d.principal += net;
+        // Update totals first so we can derive principal from the shares' actual worth.
+        // This ensures staked == principal exactly at deposit time (no rounding gap at day 0).
+        self.total_staked_balance += net;
+        self.total_stake_shares += shares;
+        let actual = if self.total_stake_shares > 0 {
+            shares as u128 * self.total_staked_balance / self.total_stake_shares
+        } else {
+            net
+        };
+        d.principal += actual;
         d.unlock_timestamp_ns = env::block_timestamp() + LOCKUP_NS;
         self.delegators.insert(&account_id, &d);
 
-        self.total_staked_balance += net;
-        self.total_stake_shares += shares;
         self.internal_restake();
     }
 
@@ -337,6 +344,19 @@ impl StakingPool {
         require!(env::predecessor_account_id() == self.owner_id, "Owner only");
         self.total_staked_balance = total_staked.0;
         self.last_locked_balance = last_locked.0;
+    }
+
+    /// Sync caller's principal down to their current staked value.
+    /// Fixes the rounding gap from older contract versions where staked < principal → rewards show 0.
+    /// Safe: only adjusts when staked < principal. Never reduces principal when real rewards exist.
+    pub fn sync_principal(&mut self) {
+        let account_id = env::predecessor_account_id();
+        let mut d = self.delegators.get(&account_id).expect("No stake found");
+        let staked = self.amount_for_shares(d.stake_shares);
+        if staked < d.principal {
+            d.principal = staked;
+            self.delegators.insert(&account_id, &d);
+        }
     }
 
     /// Fix a delegator's shares and principal after accounting corruption.
