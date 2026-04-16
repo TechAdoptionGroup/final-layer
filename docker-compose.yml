@@ -1,0 +1,27 @@
+version: "3.8"
+
+services:
+  node:
+    build:
+      context: https://github.com/FinalLayerBlockchain/nearcore-pq.git
+      args:
+        make_target: neard
+    image: final-layer-node
+    ports:
+      - "3030:3030"
+      - "24567:24567"
+    volumes:
+      - node-data:/root/.near
+    restart: unless-stopped
+
+  staking-contract:
+    build:
+      context: .
+    image: final-layer-staking
+    volumes:
+      - ./wasm-output:/output
+    profiles:
+      - build-only
+
+volumes:
+  node-data:
